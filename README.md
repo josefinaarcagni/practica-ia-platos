@@ -6,7 +6,7 @@ Aplicación para la práctica de *prompting*. Un modelo de IA multimodal recibe 
 
 ## Antes de empezar
 
-**Clave de la API de Gemini** (gratuita):
+**Clave de la API de Gemini**:
 1. Acceda a <https://aistudio.google.com> con una cuenta de Google.
 2. Pulse «Get API key» y cree una clave.
 3. Pegue la clave en la barra lateral de la aplicación. La clave no se guarda.
@@ -44,7 +44,7 @@ Proceden de **Nutrition5k**, un conjunto de datos de Google Research (Thames *et
 
 ## Privacidad
 
-Utilice solo fotografías de platos, sin personas ni datos personales. En el nivel gratuito, el proveedor puede usar el contenido enviado para mejorar sus servicios.
+Utilice solo fotografías de platos, sin personas ni datos personales. El proveedor puede usar el contenido enviado para mejorar sus servicios.
 
 ## Fórmulas
 
