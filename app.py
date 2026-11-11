@@ -1,4 +1,4 @@
-"""Práctica MINEA: estimación nutricional de platos con IA multimodal.
+"""Estimación nutricional de platos con IA multimodal.
 
 Los alumnos suben la foto de un plato, eligen o escriben una instrucción (prompt) y un
 modelo multimodal (Gemini, gratis con una clave de Google AI Studio; o Groq) estima los
@@ -18,7 +18,7 @@ import requests
 import streamlit as st
 from PIL import Image
 
-st.set_page_config(page_title="Estimación nutricional con IA · MINEA", page_icon="🍽️", layout="wide")
+st.set_page_config(page_title="Estimación nutricional con IA", page_icon="🍽️", layout="wide")
 
 DIR_EJEMPLOS = Path(__file__).parent / "ejemplos"
 # Platos de Nutrition5k (Thames et al., CVPR 2021; CC BY 4.0): cada ingrediente se pesó al servirlo y la
