@@ -1,0 +1,378 @@
+"""Práctica MINEA: estimación nutricional de platos con IA multimodal.
+
+Los alumnos suben la foto de un plato, eligen o escriben una instrucción (prompt) y un
+modelo multimodal (Gemini, gratis con una clave de Google AI Studio; o Groq) estima los
+alimentos, los gramos y la energía. La app compara la estimación con el valor de
+referencia y guarda cada intento para calcular el error por ronda.
+"""
+import base64
+import io
+import json
+import random
+import re
+from datetime import datetime
+
+import pandas as pd
+import requests
+import streamlit as st
+from PIL import Image
+
+st.set_page_config(page_title="IA y platos · MINEA", page_icon="🍽️", layout="wide")
+
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"
+GROQ_URL = "https://api.groq.com/openai/v1"
+GROQ_DEFAULT = "meta-llama/llama-4-scout-17b-16e-instruct"
+NUTRIENTES = ["kcal", "proteinas_g", "hidratos_g", "grasas_g", "fibra_g"]
+NOMBRES = {"kcal": "Energía (kcal)", "proteinas_g": "Proteínas (g)", "hidratos_g": "Hidratos de carbono (g)",
+           "grasas_g": "Grasas (g)", "fibra_g": "Fibra (g)"}
+
+FORMATO_JSON = """Responde ÚNICAMENTE con un objeto JSON válido, sin texto adicional, con esta estructura:
+{
+  "alimentos": [
+    {"nombre": "...", "gramos": 0, "kcal": 0, "proteinas_g": 0, "hidratos_g": 0, "grasas_g": 0, "fibra_g": 0}
+  ],
+  "total": {"kcal": 0, "proteinas_g": 0, "hidratos_g": 0, "grasas_g": 0, "fibra_g": 0},
+  "confianza": "baja | media | alta",
+  "supuestos": ["..."]
+}"""
+
+PLANTILLAS = {
+    "1 · Básica": "¿Cuántas calorías tiene este plato?",
+    "2 · Estructurada": (
+        "Actúa como dietista-nutricionista experto en evaluación dietética.\n"
+        "Analiza la fotografía de este plato.\n"
+        "1. Identifica cada alimento visible.\n"
+        "2. Estima los gramos de cada alimento.\n"
+        "3. Calcula la energía y los macronutrientes de cada alimento usando valores de tablas de composición "
+        "españolas (BEDCA) para el alimento tal como se ve (cocinado, crudo, frito…).\n\n" + FORMATO_JSON),
+    "3 · Con contexto": (
+        "Actúa como dietista-nutricionista experto en evaluación dietética.\n"
+        "Contexto: la foto es un plato servido en España. El plato mide aproximadamente {diametro} cm de diámetro; "
+        "úsalo como referencia de tamaño para estimar las porciones.\n"
+        "Información adicional sobre el plato: {notas}\n\n"
+        "Pasos:\n"
+        "1. Identifica cada alimento visible y los ingredientes probables no visibles (aceite de cocinado, "
+        "salsas, azúcar).\n"
+        "2. Estima los gramos de cada uno comparando con el tamaño del plato.\n"
+        "3. Calcula energía, proteínas, hidratos de carbono, grasas y fibra con valores de BEDCA.\n"
+        "4. Si no estás seguro de algo, indícalo en «supuestos» y no lo inventes.\n\n" + FORMATO_JSON),
+    "4 · Libre": "",
+}
+
+DEMO = {
+    "alimentos": [
+        {"nombre": "arroz blanco cocido", "gramos": 150, "kcal": 195, "proteinas_g": 4, "hidratos_g": 42, "grasas_g": 0.4, "fibra_g": 0.6},
+        {"nombre": "pechuga de pollo a la plancha", "gramos": 120, "kcal": 198, "proteinas_g": 37, "hidratos_g": 0, "grasas_g": 4.3, "fibra_g": 0},
+        {"nombre": "aceite de oliva (cocinado)", "gramos": 8, "kcal": 72, "proteinas_g": 0, "hidratos_g": 0, "grasas_g": 8, "fibra_g": 0},
+        {"nombre": "ensalada (lechuga y tomate)", "gramos": 80, "kcal": 15, "proteinas_g": 0.8, "hidratos_g": 2.6, "grasas_g": 0.2, "fibra_g": 1.2},
+    ],
+    "confianza": "media",
+    "supuestos": ["Respuesta SIMULADA (modo demostración): no se ha analizado la foto."],
+}
+
+
+# ------------------------------------------------------------------ utilidades
+def secreto(nombre):
+    try:
+        return st.secrets.get(nombre, "")
+    except Exception:
+        return ""
+
+
+def imagen_a_jpeg(archivo, lado_max=1024):
+    img = Image.open(archivo).convert("RGB")
+    img.thumbnail((lado_max, lado_max))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=88)
+    return img, buf.getvalue()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def modelos_gemini(clave):
+    """Modelos Gemini disponibles para esta clave que aceptan generateContent (se priorizan los Flash)."""
+    r = requests.get(f"{GEMINI_URL}/models", headers={"x-goog-api-key": clave}, params={"pageSize": 200}, timeout=20)
+    r.raise_for_status()
+    nombres = [m["name"].split("/", 1)[1] for m in r.json().get("models", [])
+               if "generateContent" in m.get("supportedGenerationMethods", [])
+               and m["name"].split("/", 1)[1].startswith("gemini")]
+    excluir = ("image", "tts", "audio", "live", "embedding", "thinking-exp")
+    nombres = [n for n in nombres if not any(e in n for e in excluir)]
+    flash = sorted([n for n in nombres if "flash" in n], reverse=True)
+    resto = sorted([n for n in nombres if "flash" not in n], reverse=True)
+    return flash + resto
+
+
+def llamar_gemini(clave, modelo, prompt, jpeg, temperatura, forzar_json):
+    cuerpo = {
+        "contents": [{"parts": [{"text": prompt},
+                                {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(jpeg).decode()}}]}],
+        "generationConfig": {"temperature": temperatura},
+    }
+    if forzar_json:
+        cuerpo["generationConfig"]["responseMimeType"] = "application/json"
+    r = requests.post(f"{GEMINI_URL}/models/{modelo}:generateContent", headers={"x-goog-api-key": clave},
+                      json=cuerpo, timeout=120)
+    if r.status_code != 200:
+        raise RuntimeError(f"Error {r.status_code} de la API de Gemini: {r.text[:500]}")
+    datos = r.json()
+    try:
+        return "".join(p.get("text", "") for p in datos["candidates"][0]["content"]["parts"])
+    except (KeyError, IndexError):
+        raise RuntimeError(f"Respuesta sin texto (posible bloqueo de seguridad): {json.dumps(datos)[:500]}")
+
+
+def llamar_groq(clave, modelo, prompt, jpeg, temperatura, forzar_json):
+    cuerpo = {
+        "model": modelo,
+        "temperature": temperatura,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()}}]}],
+    }
+    if forzar_json:
+        cuerpo["response_format"] = {"type": "json_object"}
+    r = requests.post(f"{GROQ_URL}/chat/completions", headers={"Authorization": f"Bearer {clave}"}, json=cuerpo, timeout=120)
+    if r.status_code != 200:
+        raise RuntimeError(f"Error {r.status_code} de la API de Groq: {r.text[:500]}")
+    return r.json()["choices"][0]["message"]["content"]
+
+
+def respuesta_demo():
+    d = json.loads(json.dumps(DEMO))
+    for a in d["alimentos"]:  # pequeña variación para simular la variabilidad entre respuestas
+        f = random.uniform(0.85, 1.15)
+        for k in ["gramos"] + NUTRIENTES:
+            a[k] = round(a[k] * f, 1)
+    d["total"] = {k: round(sum(a[k] for a in d["alimentos"]), 1) for k in NUTRIENTES}
+    return json.dumps(d, ensure_ascii=False, indent=2)
+
+
+def extraer_json(texto):
+    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", texto.strip(), flags=re.S)
+    try:
+        return json.loads(t)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", t, flags=re.S)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
+def numero(v):
+    try:
+        return float(str(v).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
+def totales(d):
+    """Totales de energía y nutrientes a partir del JSON (campo total o suma de alimentos)."""
+    out = {}
+    tot = d.get("total") if isinstance(d.get("total"), dict) else {}
+    alimentos = d.get("alimentos") if isinstance(d.get("alimentos"), list) else []
+    for k in NUTRIENTES:
+        v = numero(tot.get(k)) if tot else None
+        if v is None and k == "kcal":
+            v = numero(d.get("total_kcal"))
+        if v is None and alimentos:
+            vals = [numero(a.get(k)) for a in alimentos if isinstance(a, dict)]
+            vals = [x for x in vals if x is not None]
+            v = sum(vals) if vals else None
+        out[k] = v
+    return out
+
+
+def kcal_de_texto(texto):
+    """Para respuestas en texto libre: busca cifras (o rangos) seguidas de «kcal» o «calorías» y devuelve la mayor,
+    que suele ser el total del plato. Los rangos (p. ej., 500-600 kcal) se resumen con su punto medio."""
+    patron = r"(\d{1,2}[.\s]\d{3}|\d+(?:[.,]\d+)?)\s*(?:(?:-|–|a)\s*(\d{1,2}[.\s]\d{3}|\d+(?:[.,]\d+)?))?\s*(?:kcal|calor[ií]as)"
+    def num(x):
+        x = re.sub(r"(?<=\d)[.\s](?=\d{3}$)", "", x)
+        return numero(x)
+    vals = []
+    for a, b in re.findall(patron, texto, flags=re.I):
+        va, vb = num(a), num(b) if b else None
+        vals.append((va + vb) / 2 if va is not None and vb is not None else va)
+    vals = [v for v in vals if v]
+    return max(vals) if vals else None
+
+
+# ------------------------------------------------------------------ estado
+if "intentos" not in st.session_state:
+    st.session_state.intentos = []
+
+# ------------------------------------------------------------------ barra lateral
+with st.sidebar:
+    st.header("Configuración")
+    proveedor = st.radio("Proveedor del modelo", ["Gemini (Google)", "Groq", "Modo demostración"],
+                         help="Gemini tiene un nivel gratuito con una clave de Google AI Studio. "
+                              "El modo demostración no usa internet y devuelve una respuesta simulada.")
+    clave, modelo = "", ""
+    if proveedor == "Gemini (Google)":
+        clave = st.text_input("Clave de la API de Gemini", value=secreto("GEMINI_API_KEY"), type="password",
+                              help="Créala gratis en https://aistudio.google.com → «Get API key».")
+        lista = []
+        if clave:
+            try:
+                lista = modelos_gemini(clave)
+            except Exception as e:
+                st.warning(f"No se pudo obtener la lista de modelos ({e}). Escribe el nombre a mano.")
+        if lista:
+            modelo = st.selectbox("Modelo", lista, help="Los modelos «flash» suelen estar incluidos en el nivel gratuito.")
+        else:
+            modelo = st.text_input("Modelo", value="gemini-2.5-flash")
+    elif proveedor == "Groq":
+        clave = st.text_input("Clave de la API de Groq", value=secreto("GROQ_API_KEY"), type="password",
+                              help="Créala en https://console.groq.com/keys")
+        modelo = st.text_input("Modelo", value=GROQ_DEFAULT)
+    else:
+        modelo = "demo"
+    temperatura = st.slider("Temperatura", 0.0, 1.0, 0.2, 0.1,
+                            help="Valores bajos dan respuestas más estables; valores altos, más variadas.")
+    forzar_json = st.checkbox("Forzar respuesta en JSON", value=False,
+                              help="Pide al servicio que devuelva JSON válido. Déjalo desactivado en la ronda 1 "
+                                   "para ver la diferencia con una instrucción básica.")
+    st.divider()
+    st.caption("⚠️ Sube solo fotos de platos, sin personas ni datos personales. En el nivel gratuito, "
+               "el proveedor puede usar el contenido enviado para mejorar sus servicios.")
+
+# ------------------------------------------------------------------ cuerpo
+st.title("🍽️ Estimación nutricional de platos con IA")
+st.markdown("Sube la foto de un plato, elige una instrucción y compara la estimación del modelo con el valor de referencia.")
+
+c1, c2 = st.columns([1, 1.25], gap="large")
+
+with c1:
+    st.subheader("1. Foto del plato")
+    origen = st.radio("Origen", ["Subir archivo", "Cámara"], horizontal=True, label_visibility="collapsed")
+    archivo = st.file_uploader("Foto (JPG o PNG)", type=["jpg", "jpeg", "png", "webp"]) if origen == "Subir archivo" \
+        else st.camera_input("Haz una foto del plato")
+    nombre_plato = st.text_input("Nombre del plato (para la tabla)", placeholder="p. ej., lentejas con chorizo")
+    jpeg = None
+    if archivo:
+        img, jpeg = imagen_a_jpeg(archivo)
+        st.image(img, width="stretch")
+
+    st.subheader("2. Valores de referencia (opcional)")
+    st.caption("Composición real del plato (pesada y calculada con BEDCA). Deja en 0 lo que no conozcas.")
+    ref = {}
+    rc = st.columns(3)
+    for i, k in enumerate(NUTRIENTES):
+        ref[k] = rc[i % 3].number_input(NOMBRES[k], min_value=0.0, value=0.0, step=1.0, key=f"ref_{k}")
+
+with c2:
+    st.subheader("3. Instrucción (prompt)")
+    plantilla = st.selectbox("Plantilla", list(PLANTILLAS), index=1)
+    diametro, notas = 26, "ninguna"
+    if plantilla.startswith("3"):
+        cc = st.columns([1, 2])
+        diametro = cc[0].number_input("Diámetro del plato (cm)", 10, 40, 26)
+        notas = cc[1].text_input("Información adicional", value="ninguna",
+                                 placeholder="p. ej., cocinado con dos cucharadas de aceite")
+    base = PLANTILLAS[plantilla].replace("{diametro}", str(diametro)).replace("{notas}", notas or "ninguna")
+    prompt = st.text_area("Puedes modificar la instrucción antes de enviarla", value=base, height=330,
+                          key=f"prompt_{plantilla}_{diametro}_{notas}")
+    cc = st.columns([1, 1, 1.2])
+    ronda = cc[0].selectbox("Ronda", [1, 2, 3, 4], index=min(int(plantilla[0]) - 1, 3))
+    repeticiones = cc[1].number_input("Repeticiones", 1, 3, 1, help="Repite la misma petición para ver la variabilidad.")
+    enviar = cc[2].button("Analizar plato", type="primary", width="stretch",
+                          disabled=(jpeg is None and proveedor != "Modo demostración") or not prompt.strip())
+
+# ------------------------------------------------------------------ llamada al modelo
+if enviar:
+    if proveedor != "Modo demostración" and not clave:
+        st.error("Falta la clave de la API en la barra lateral.")
+        st.stop()
+    for rep in range(int(repeticiones)):
+        with st.spinner(f"Consultando el modelo ({rep + 1}/{int(repeticiones)})…"):
+            try:
+                if proveedor == "Gemini (Google)":
+                    texto = llamar_gemini(clave, modelo, prompt, jpeg, temperatura, forzar_json)
+                elif proveedor == "Groq":
+                    texto = llamar_groq(clave, modelo, prompt, jpeg, temperatura, forzar_json)
+                else:
+                    texto = respuesta_demo()
+            except Exception as e:
+                msg = str(e)
+                if "429" in msg:
+                    st.error("Se ha superado el límite de peticiones del nivel gratuito. Espera un minuto o cambia de modelo.")
+                else:
+                    st.error(msg)
+                st.stop()
+        datos = extraer_json(texto)
+        est = totales(datos) if isinstance(datos, dict) else {k: None for k in NUTRIENTES}
+        if est["kcal"] is None:
+            est["kcal"] = kcal_de_texto(texto)
+        fila = {"hora": datetime.now().strftime("%H:%M:%S"), "ronda": ronda, "plato": nombre_plato or "(sin nombre)",
+                "plantilla": plantilla, "modelo": modelo, "temperatura": temperatura,
+                "json_valido": isinstance(datos, dict)}
+        for k in NUTRIENTES:
+            fila[f"{k}_est"] = est[k]
+            fila[f"{k}_ref"] = ref[k] or None
+        if est["kcal"] is not None and ref["kcal"]:
+            fila["error_kcal"] = round(est["kcal"] - ref["kcal"], 1)
+            fila["error_abs_kcal"] = abs(fila["error_kcal"])
+            fila["error_rel_%"] = round(100 * fila["error_abs_kcal"] / ref["kcal"], 1)
+        fila["prompt"] = prompt
+        fila["respuesta"] = texto
+        st.session_state.intentos.append(fila)
+    st.session_state.ultimo = (texto, datos)
+
+# ------------------------------------------------------------------ resultado
+if "ultimo" in st.session_state:
+    texto, datos = st.session_state.ultimo
+    st.divider()
+    st.subheader("4. Resultado del último intento")
+    r1, r2 = st.columns([1.3, 1], gap="large")
+    with r1:
+        if isinstance(datos, dict) and isinstance(datos.get("alimentos"), list):
+            df = pd.DataFrame(datos["alimentos"])
+            st.dataframe(df, width="stretch", hide_index=True)
+            if datos.get("supuestos"):
+                st.markdown("**Supuestos del modelo:** " + "; ".join(map(str, datos["supuestos"])))
+            if datos.get("confianza"):
+                st.markdown(f"**Confianza declarada:** {datos['confianza']}")
+        else:
+            st.info("La respuesta no es un JSON con la estructura esperada (normal con la instrucción básica). "
+                    "Se ha intentado leer la cifra de kcal del texto.")
+            st.markdown(texto)
+    with r2:
+        ult = st.session_state.intentos[-1]
+        for k in NUTRIENTES:
+            e, rf = ult.get(f"{k}_est"), ult.get(f"{k}_ref")
+            if e is None:
+                continue
+            delta = None if not rf else f"{e - rf:+.0f} frente a la referencia ({100 * (e - rf) / rf:+.0f} %)"
+            st.metric(NOMBRES[k], f"{e:.0f}", delta, delta_color="off")
+        with st.expander("Respuesta completa del modelo"):
+            st.code(texto, language="json" if isinstance(datos, dict) else None)
+
+# ------------------------------------------------------------------ historial
+if st.session_state.intentos:
+    st.divider()
+    st.subheader("5. Comparación de intentos")
+    hist = pd.DataFrame(st.session_state.intentos)
+    cols = ["hora", "ronda", "plato", "plantilla", "modelo", "json_valido", "kcal_est", "kcal_ref",
+            "error_kcal", "error_rel_%"]
+    st.dataframe(hist[[c for c in cols if c in hist.columns]], width="stretch", hide_index=True)
+    if "error_abs_kcal" in hist.columns and hist["error_abs_kcal"].notna().any():
+        resumen = (hist.dropna(subset=["error_abs_kcal"]).groupby("ronda")
+                   .agg(intentos=("error_abs_kcal", "size"), MAE_kcal=("error_abs_kcal", "mean"),
+                        error_relativo_medio=("error_rel_%", "mean")).round(1))
+        s1, s2 = st.columns([1, 1.4])
+        s1.markdown("**Error por ronda**")
+        s1.dataframe(resumen, width="stretch")
+        s2.markdown("**Error absoluto medio (kcal) por ronda**")
+        s2.bar_chart(resumen["MAE_kcal"].rename(index=lambda r: f"Ronda {r}"))
+    else:
+        st.caption("Introduce las kcal de referencia para calcular el error de cada intento.")
+    b1, b2 = st.columns([1, 1])
+    b1.download_button("Descargar tabla (CSV)", hist.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="intentos_platos.csv", mime="text/csv", width="stretch")
+    if b2.button("Borrar historial", width="stretch"):
+        st.session_state.intentos = []
+        st.session_state.pop("ultimo", None)
+        st.rerun()
