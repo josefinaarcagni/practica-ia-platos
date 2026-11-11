@@ -1,6 +1,6 @@
 # Estimación nutricional de platos con IA multimodal
 
-**Máster MINEA · Inteligencia artificial y machine learning en la nutrición personalizada**
+**Inteligencia artificial y Machine Learning en la nutrición personalizada**
 
 Aplicación para la práctica de *prompting*. Un modelo de IA multimodal recibe la fotografía de un plato y una instrucción (*prompt*). A partir de ellas estima los alimentos, las porciones, la energía y los macronutrientes. La aplicación compara esa estimación con la composición de referencia y registra el error de cada intento.
 
