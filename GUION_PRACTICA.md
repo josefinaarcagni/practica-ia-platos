@@ -15,10 +15,12 @@
   1. Entra en <https://aistudio.google.com> con una cuenta de Google.
   2. Pulsa «Get API key» y crea una clave.
   3. Pégala en la barra lateral de la app.
-- La foto de un plato cuya composición conozcas: pesado en casa, o una receta con cantidades conocidas.
-  - Hazla desde arriba y con todo el plato visible.
-  - No debe aparecer ninguna persona.
-- Valores de referencia del plato, calculados con BEDCA (<https://www.bedca.net>): kcal, proteínas, hidratos de carbono, grasas y fibra.
+- Un plato cuya composición se conozca. Hay dos opciones:
+  - **Plato de ejemplo** de la app. Sus ingredientes se pesaron al servirlo y los valores de referencia se rellenan solos.
+  - **Plato propio**, pesado en casa o preparado con una receta de cantidades conocidas.
+    - Haz la foto desde arriba y con todo el plato visible.
+    - No debe aparecer ninguna persona.
+    - Calcula los valores de referencia con BEDCA (<https://www.bedca.net>): kcal, proteínas, hidratos de carbono, grasas y fibra.
 
 ## Desarrollo (en parejas)
 

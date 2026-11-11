@@ -11,13 +11,46 @@ import json
 import random
 import re
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import requests
 import streamlit as st
 from PIL import Image
 
-st.set_page_config(page_title="IA y platos · MINEA", page_icon="🍽️", layout="wide")
+st.set_page_config(page_title="Estimación nutricional con IA · MINEA", page_icon="🍽️", layout="wide")
+
+DIR_EJEMPLOS = Path(__file__).parent / "ejemplos"
+# Platos de Nutrition5k (Thames et al., CVPR 2021; CC BY 4.0): cada ingrediente se pesó al servirlo y la
+# composición se calculó con la base de datos del USDA. No hay datos de fibra.
+EJEMPLOS = {
+    "Ensalada de bacalao con maíz": {
+        "archivo": "dish_1562613045.jpg",
+        "ref": {"kcal": 166, "proteinas_g": 21.5, "hidratos_g": 18.3, "grasas_g": 1.8},
+        "ingredientes": [("Bacalao", 96, 81), ("Maíz", 79, 76), ("Brotes de hoja verde", 32, 9)]},
+    "Pollo con espinacas y brócoli": {
+        "archivo": "dish_1565811025.jpg",
+        "ref": {"kcal": 361, "proteinas_g": 65.4, "hidratos_g": 4.4, "grasas_g": 7.7},
+        "ingredientes": [("Pollo", 205, 338), ("Brócoli", 52, 18), ("Espinaca cruda", 20, 5)]},
+    "Pollo a la plancha con aceitunas y tomate": {
+        "archivo": "dish_1564083508.jpg",
+        "ref": {"kcal": 276, "proteinas_g": 22.8, "hidratos_g": 6.0, "grasas_g": 18.4},
+        "ingredientes": [("Pollo a la plancha", 96, 217), ("Tomate cherry", 92, 17), ("Aceitunas", 37, 43)]},
+    "Huevos revueltos con boniato y coles de Bruselas": {
+        "archivo": "dish_1562605384.jpg",
+        "ref": {"kcal": 306, "proteinas_g": 17.0, "hidratos_g": 18.4, "grasas_g": 18.4},
+        "ingredientes": [("Huevos revueltos", 147, 218), ("Boniato", 65, 50), ("Coles de Bruselas", 47, 20),
+                         ("Aceite de oliva", 2, 19)]},
+    "Ensalada de atún": {
+        "archivo": "dish_1565809120.jpg",
+        "ref": {"kcal": 366, "proteinas_g": 63.2, "hidratos_g": 22.9, "grasas_g": 1.7},
+        "ingredientes": [("Atún", 205, 266), ("Pimiento", 98, 39), ("Tomate cherry", 74, 13), ("Cebolla", 56, 22),
+                         ("Zanahoria", 52, 21), ("Zumo de limón", 17, 3)]},
+    "Almendras con brócoli y coliflor": {
+        "archivo": "dish_1558725286.jpg",
+        "ref": {"kcal": 817, "proteinas_g": 33.3, "hidratos_g": 40.7, "grasas_g": 66.0},
+        "ingredientes": [("Almendras", 132, 763), ("Brócoli", 97, 34), ("Coliflor", 79, 20)]},
+}
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"
 GROQ_URL = "https://api.groq.com/openai/v1"
@@ -47,7 +80,7 @@ PLANTILLAS = {
         "españolas (BEDCA) para el alimento tal como se ve (cocinado, crudo, frito…).\n\n" + FORMATO_JSON),
     "3 · Con contexto": (
         "Actúa como dietista-nutricionista experto en evaluación dietética.\n"
-        "Contexto: la foto es un plato servido en España. El plato mide aproximadamente {diametro} cm de diámetro; "
+        "Contexto: el plato mide aproximadamente {diametro} cm de diámetro; "
         "úsalo como referencia de tamaño para estimar las porciones.\n"
         "Información adicional sobre el plato: {notas}\n\n"
         "Pasos:\n"
@@ -67,7 +100,7 @@ DEMO = {
         {"nombre": "ensalada (lechuga y tomate)", "gramos": 80, "kcal": 15, "proteinas_g": 0.8, "hidratos_g": 2.6, "grasas_g": 0.2, "fibra_g": 1.2},
     ],
     "confianza": "media",
-    "supuestos": ["Respuesta SIMULADA (modo demostración): no se ha analizado la foto."],
+    "supuestos": ["Respuesta simulada (modo demostración): no se ha analizado la fotografía."],
 }
 
 
@@ -213,55 +246,83 @@ with st.sidebar:
     clave, modelo = "", ""
     if proveedor == "Gemini (Google)":
         clave = st.text_input("Clave de la API de Gemini", value=secreto("GEMINI_API_KEY"), type="password",
-                              help="Créala gratis en https://aistudio.google.com → «Get API key».")
+                              help="Clave gratuita en https://aistudio.google.com → «Get API key».")
         lista = []
         if clave:
             try:
                 lista = modelos_gemini(clave)
             except Exception as e:
-                st.warning(f"No se pudo obtener la lista de modelos ({e}). Escribe el nombre a mano.")
+                st.warning(f"No se pudo obtener la lista de modelos ({e}). Indique el nombre del modelo manualmente.")
         if lista:
             modelo = st.selectbox("Modelo", lista, help="Los modelos «flash» suelen estar incluidos en el nivel gratuito.")
         else:
             modelo = st.text_input("Modelo", value="gemini-2.5-flash")
     elif proveedor == "Groq":
         clave = st.text_input("Clave de la API de Groq", value=secreto("GROQ_API_KEY"), type="password",
-                              help="Créala en https://console.groq.com/keys")
+                              help="Clave en https://console.groq.com/keys")
         modelo = st.text_input("Modelo", value=GROQ_DEFAULT)
     else:
         modelo = "demo"
     temperatura = st.slider("Temperatura", 0.0, 1.0, 0.2, 0.1,
                             help="Valores bajos dan respuestas más estables; valores altos, más variadas.")
     forzar_json = st.checkbox("Forzar respuesta en JSON", value=False,
-                              help="Pide al servicio que devuelva JSON válido. Déjalo desactivado en la ronda 1 "
+                              help="Pide al servicio que devuelva JSON válido. Desactivado en la ronda 1, "
                                    "para ver la diferencia con una instrucción básica.")
     st.divider()
-    st.caption("⚠️ Sube solo fotos de platos, sin personas ni datos personales. En el nivel gratuito, "
-               "el proveedor puede usar el contenido enviado para mejorar sus servicios.")
+    st.caption("Use solo fotografías de platos, sin personas ni datos personales. En el nivel gratuito, "
+               "el proveedor puede utilizar el contenido enviado para mejorar sus servicios.")
+
+
+def cargar_ejemplo():
+    """Al elegir un plato de ejemplo, rellena el nombre y los valores de referencia medidos."""
+    nombre = st.session_state.get("ejemplo")
+    if nombre in EJEMPLOS:
+        st.session_state.nombre_plato = nombre
+        for k in NUTRIENTES:
+            st.session_state[f"ref_{k}"] = float(EJEMPLOS[nombre]["ref"].get(k, 0.0))
+
 
 # ------------------------------------------------------------------ cuerpo
-st.title("🍽️ Estimación nutricional de platos con IA")
-st.markdown("Sube la foto de un plato, elige una instrucción y compara la estimación del modelo con el valor de referencia.")
+st.title("Estimación nutricional de platos con IA multimodal")
+st.markdown("Máster MINEA · Práctica de *prompting*. Compare la estimación del modelo con la composición "
+            "de referencia y analice cómo cambia el error al modificar la instrucción.")
 
 c1, c2 = st.columns([1, 1.25], gap="large")
 
 with c1:
-    st.subheader("1. Foto del plato")
-    origen = st.radio("Origen", ["Subir archivo", "Cámara"], horizontal=True, label_visibility="collapsed")
-    archivo = st.file_uploader("Foto (JPG o PNG)", type=["jpg", "jpeg", "png", "webp"]) if origen == "Subir archivo" \
-        else st.camera_input("Haz una foto del plato")
-    nombre_plato = st.text_input("Nombre del plato (para la tabla)", placeholder="p. ej., lentejas con chorizo")
+    st.subheader("1. Fotografía del plato")
+    origen = st.radio("Origen", ["Plato de ejemplo", "Subir archivo", "Cámara"], horizontal=True,
+                      label_visibility="collapsed")
+    archivo, ejemplo = None, None
+    if origen == "Plato de ejemplo":
+        ejemplo = st.selectbox("Plato", list(EJEMPLOS), index=None, placeholder="Seleccione un plato",
+                               key="ejemplo", on_change=cargar_ejemplo)
+        if ejemplo:
+            archivo = DIR_EJEMPLOS / EJEMPLOS[ejemplo]["archivo"]
+    elif origen == "Subir archivo":
+        archivo = st.file_uploader("Fotografía (JPG o PNG)", type=["jpg", "jpeg", "png", "webp"])
+    else:
+        archivo = st.camera_input("Fotografía del plato")
+    nombre_plato = st.text_input("Nombre del plato", key="nombre_plato", placeholder="p. ej., lentejas con chorizo")
     jpeg = None
     if archivo:
         img, jpeg = imagen_a_jpeg(archivo)
         st.image(img, width="stretch")
+    if ejemplo:
+        with st.expander("Composición medida del plato"):
+            st.dataframe(pd.DataFrame(EJEMPLOS[ejemplo]["ingredientes"], columns=["Ingrediente", "Gramos", "kcal"]),
+                         width="stretch", hide_index=True)
+            st.caption("Fuente: Nutrition5k (Thames et al., CVPR 2021), Google Research, licencia CC BY 4.0. "
+                       "Ingredientes pesados al servir el plato; composición calculada con la base de datos "
+                       "del USDA. Sin datos de fibra.")
 
-    st.subheader("2. Valores de referencia (opcional)")
-    st.caption("Composición real del plato (pesada y calculada con BEDCA). Deja en 0 lo que no conozcas.")
+    st.subheader("2. Valores de referencia")
+    st.caption("Composición real del plato. En los platos propios, pese los ingredientes y calcule los valores "
+               "con BEDCA. Deje en 0 los que no conozca.")
     ref = {}
     rc = st.columns(3)
     for i, k in enumerate(NUTRIENTES):
-        ref[k] = rc[i % 3].number_input(NOMBRES[k], min_value=0.0, value=0.0, step=1.0, key=f"ref_{k}")
+        ref[k] = rc[i % 3].number_input(NOMBRES[k], min_value=0.0, step=1.0, key=f"ref_{k}")
 
 with c2:
     st.subheader("3. Instrucción (prompt)")
@@ -273,11 +334,11 @@ with c2:
         notas = cc[1].text_input("Información adicional", value="ninguna",
                                  placeholder="p. ej., cocinado con dos cucharadas de aceite")
     base = PLANTILLAS[plantilla].replace("{diametro}", str(diametro)).replace("{notas}", notas or "ninguna")
-    prompt = st.text_area("Puedes modificar la instrucción antes de enviarla", value=base, height=330,
+    prompt = st.text_area("Instrucción (editable)", value=base, height=330,
                           key=f"prompt_{plantilla}_{diametro}_{notas}")
     cc = st.columns([1, 1, 1.2])
     ronda = cc[0].selectbox("Ronda", [1, 2, 3, 4], index=min(int(plantilla[0]) - 1, 3))
-    repeticiones = cc[1].number_input("Repeticiones", 1, 3, 1, help="Repite la misma petición para ver la variabilidad.")
+    repeticiones = cc[1].number_input("Repeticiones", 1, 3, 1, help="Envía la misma petición varias veces para observar la variabilidad.")
     enviar = cc[2].button("Analizar plato", type="primary", width="stretch",
                           disabled=(jpeg is None and proveedor != "Modo demostración") or not prompt.strip())
 
@@ -298,7 +359,7 @@ if enviar:
             except Exception as e:
                 msg = str(e)
                 if "429" in msg:
-                    st.error("Se ha superado el límite de peticiones del nivel gratuito. Espera un minuto o cambia de modelo.")
+                    st.error("Se ha superado el límite de peticiones del nivel gratuito. Espere un minuto o seleccione otro modelo.")
                 else:
                     st.error(msg)
                 st.stop()
@@ -336,7 +397,7 @@ if "ultimo" in st.session_state:
             if datos.get("confianza"):
                 st.markdown(f"**Confianza declarada:** {datos['confianza']}")
         else:
-            st.info("La respuesta no es un JSON con la estructura esperada (normal con la instrucción básica). "
+            st.info("La respuesta no es un JSON con la estructura esperada (habitual con la instrucción básica). "
                     "Se ha intentado leer la cifra de kcal del texto.")
             st.markdown(texto)
     with r2:
@@ -368,7 +429,7 @@ if st.session_state.intentos:
         s2.markdown("**Error absoluto medio (kcal) por ronda**")
         s2.bar_chart(resumen["MAE_kcal"].rename(index=lambda r: f"Ronda {r}"))
     else:
-        st.caption("Introduce las kcal de referencia para calcular el error de cada intento.")
+        st.caption("Indique las kcal de referencia para calcular el error de cada intento.")
     b1, b2 = st.columns([1, 1])
     b1.download_button("Descargar tabla (CSV)", hist.to_csv(index=False).encode("utf-8-sig"),
                        file_name="intentos_platos.csv", mime="text/csv", width="stretch")
