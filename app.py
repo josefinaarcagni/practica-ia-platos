@@ -334,7 +334,7 @@ with st.sidebar:
     if proveedor == "Gemini (Google)":
         clave = st.text_input("Clave de la API de Gemini", value=secreto("GEMINI_API_KEY"), type="password",
                               help="La clave solo se usa durante esta sesión y no se guarda.")
-        with st.expander("Cómo obtener la clave (gratuita)", expanded=not clave):
+        with st.expander("Cómo obtener la clave", expanded=not clave):
             st.markdown(
                 "1. Acceda a [Google AI Studio](https://aistudio.google.com/apikey) con una cuenta de Google.\n"
                 "2. Acepte las condiciones de uso, si se le solicitan.\n"
@@ -394,7 +394,7 @@ def cargar_ejemplo():
 
 # ------------------------------------------------------------------ cuerpo
 st.title("Estimación nutricional de platos con IA multimodal")
-st.markdown("Máster MINEA · Práctica de *prompting*. Compare la estimación del modelo con la composición "
+st.markdown("Práctica de *prompting*. Compare la estimación del modelo con la composición "
             "de referencia y analice cómo cambia el error al modificar la instrucción.")
 
 c1, c2 = st.columns([1, 1.25], gap="large")
