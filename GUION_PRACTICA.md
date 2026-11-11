@@ -1,6 +1,6 @@
-# Práctica 2. Estimación nutricional de platos con IA multimodal
+# Estimación nutricional de platos con IA multimodal
 
-**Máster MINEA · Inteligencia artificial y aprendizaje automático en la nutrición personalizada**
+**Inteligencia artificial y aprendizaje automático en la nutrición personalizada**
 
 ## Objetivos
 
@@ -11,7 +11,7 @@
 ## Material
 
 - La aplicación (el enlace lo da la profesora).
-- Una clave gratuita de la API de Gemini. Para crearla:
+- Una clave de la API de Gemini. Para crearla:
   1. Entra en <https://aistudio.google.com> con una cuenta de Google.
   2. Pulsa «Get API key» y crea una clave.
   3. Pégala en la barra lateral de la app.
