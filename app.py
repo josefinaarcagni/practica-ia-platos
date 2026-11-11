@@ -246,7 +246,15 @@ with st.sidebar:
     clave, modelo = "", ""
     if proveedor == "Gemini (Google)":
         clave = st.text_input("Clave de la API de Gemini", value=secreto("GEMINI_API_KEY"), type="password",
-                              help="Clave gratuita en https://aistudio.google.com → «Get API key».")
+                              help="La clave solo se usa durante esta sesión y no se guarda.")
+        with st.expander("Cómo obtener la clave (gratuita)", expanded=not clave):
+            st.markdown(
+                "1. Acceda a [Google AI Studio](https://aistudio.google.com/apikey) con una cuenta de Google.\n"
+                "2. Acepte las condiciones de uso, si se le solicitan.\n"
+                "3. Pulse **Create API key** y copie la clave generada.\n"
+                "4. Péguela en el campo superior y pulse Intro.\n\n"
+                "No se necesita tarjeta de crédito. El nivel gratuito limita el número de peticiones por minuto; "
+                "si aparece un error 429, espere un minuto antes de repetir.")
         lista = []
         if clave:
             try:
@@ -259,7 +267,12 @@ with st.sidebar:
             modelo = st.text_input("Modelo", value="gemini-2.5-flash")
     elif proveedor == "Groq":
         clave = st.text_input("Clave de la API de Groq", value=secreto("GROQ_API_KEY"), type="password",
-                              help="Clave en https://console.groq.com/keys")
+                              help="La clave solo se usa durante esta sesión y no se guarda.")
+        with st.expander("Cómo obtener la clave (gratuita)", expanded=not clave):
+            st.markdown(
+                "1. Cree una cuenta en [GroqCloud](https://console.groq.com).\n"
+                "2. En [API Keys](https://console.groq.com/keys), pulse **Create API Key**.\n"
+                "3. Copie la clave (solo se muestra una vez) y péguela en el campo superior.")
         modelo = st.text_input("Modelo", value=GROQ_DEFAULT)
     else:
         modelo = "demo"
@@ -345,7 +358,7 @@ with c2:
 # ------------------------------------------------------------------ llamada al modelo
 if enviar:
     if proveedor != "Modo demostración" and not clave:
-        st.error("Falta la clave de la API en la barra lateral.")
+        st.error("Falta la clave de la API. Consulte en la barra lateral cómo obtenerla gratuitamente.")
         st.stop()
     for rep in range(int(repeticiones)):
         with st.spinner(f"Consultando el modelo ({rep + 1}/{int(repeticiones)})…"):
