@@ -3,7 +3,7 @@
 Los alumnos suben la foto de un plato, eligen o escriben una instrucción (prompt) y un
 modelo multimodal (Gemini, gratis con una clave de Google AI Studio; o Groq) estima los
 alimentos, los gramos y la energía. La app compara la estimación con el valor de
-referencia y guarda cada intento para calcular el error por ronda.
+referencia y guarda cada intento para comparar el error entre instrucciones.
 """
 import base64
 import io
@@ -128,23 +128,72 @@ def modelos_gemini(clave):
     nombres = [m["name"].split("/", 1)[1] for m in r.json().get("models", [])
                if "generateContent" in m.get("supportedGenerationMethods", [])
                and m["name"].split("/", 1)[1].startswith("gemini")]
-    excluir = ("image", "tts", "audio", "live", "embedding", "thinking-exp")
+    excluir = ("image", "tts", "audio", "live", "embedding", "thinking", "deep-research", "computer-use",
+               "robotics", "agent", "learnlm", "native", "transcribe", "omni", "banana", "antigravity",
+               "translate")
     nombres = [n for n in nombres if not any(e in n for e in excluir)]
-    flash = sorted([n for n in nombres if "flash" in n], reverse=True)
-    resto = sorted([n for n in nombres if "flash" not in n], reverse=True)
-    return flash + resto
+
+    def prioridad(n):
+        # 0: alias estables (gemini-flash-latest); 1: Flash estable (gemini-2.5-flash); 2: Flash-Lite estable;
+        # 3: otros Flash (preview, exp); 4: resto. Dentro de cada grupo, versiones más recientes primero.
+        if re.fullmatch(r"gemini-flash(-lite)?-latest", n):
+            g = 0
+        elif re.fullmatch(r"gemini-\d+(\.\d+)?-flash", n):
+            g = 1
+        elif re.fullmatch(r"gemini-\d+(\.\d+)?-flash-lite", n):
+            g = 2
+        elif "flash" in n:
+            g = 3
+        else:
+            g = 4
+        version = re.search(r"gemini-(\d+(?:\.\d+)?)", n)
+        return (g, -float(version.group(1)) if version else 0, n)
+
+    return sorted(nombres, key=prioridad)
+
+
+def probar_modelo(clave, modelo):
+    """Petición mínima de texto para comprobar que el modelo responde con esta clave.
+    Devuelve True si responde (o si solo está saturado en ese momento) y False si no es utilizable."""
+    cab = {"x-goog-api-key": clave}
+    r = requests.post(f"{GEMINI_URL}/models/{modelo}:generateContent", headers=cab, timeout=30,
+                      json={"contents": [{"parts": [{"text": "Responde solo: OK"}]}]})
+    if r.status_code == 400 and "interactions api" in r.text.lower():
+        r = requests.post(f"{GEMINI_URL}/interactions", headers=cab, timeout=60,
+                          json={"model": modelo, "input": "Responde solo: OK"})
+    if r.status_code == 200:
+        return True
+    return r.status_code == 429 and "limit: 0" not in r.text.lower()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def modelos_operativos(clave, maximo=6):
+    """Modelos Flash de la lista que responden de verdad con esta clave (se comprueban una vez por hora)."""
+    candidatos = [m for m in modelos_gemini(clave) if "flash" in m][:maximo]
+    return [m for m in candidatos if probar_modelo(clave, m)]
+
+
+def modelo_no_compatible(mensaje):
+    """Errores que indican que el modelo no admite esta forma de llamada (no son errores del alumno)."""
+    m = mensaje.lower()
+    return any(t in m for t in ("interactions api", "error 404", "not supported", "is not found", "not found for api",
+                                "no longer available", "deprecated", "not available", "shut down", "limit: 0"))
 
 
 def llamar_gemini(clave, modelo, prompt, jpeg, temperatura, forzar_json):
+    """Llama a generateContent; si el modelo solo admite la Interactions API, usa esa interfaz."""
+    imagen_b64 = base64.b64encode(jpeg).decode()
     cuerpo = {
         "contents": [{"parts": [{"text": prompt},
-                                {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(jpeg).decode()}}]}],
+                                {"inline_data": {"mime_type": "image/jpeg", "data": imagen_b64}}]}],
         "generationConfig": {"temperature": temperatura},
     }
     if forzar_json:
         cuerpo["generationConfig"]["responseMimeType"] = "application/json"
     r = requests.post(f"{GEMINI_URL}/models/{modelo}:generateContent", headers={"x-goog-api-key": clave},
                       json=cuerpo, timeout=120)
+    if r.status_code == 400 and "interactions api" in r.text.lower():
+        return llamar_gemini_interactions(clave, modelo, prompt, imagen_b64, temperatura, forzar_json)
     if r.status_code != 200:
         raise RuntimeError(f"Error {r.status_code} de la API de Gemini: {r.text[:500]}")
     datos = r.json()
@@ -152,6 +201,44 @@ def llamar_gemini(clave, modelo, prompt, jpeg, temperatura, forzar_json):
         return "".join(p.get("text", "") for p in datos["candidates"][0]["content"]["parts"])
     except (KeyError, IndexError):
         raise RuntimeError(f"Respuesta sin texto (posible bloqueo de seguridad): {json.dumps(datos)[:500]}")
+
+
+def texto_interaction(datos):
+    """Texto generado en una respuesta de la Interactions API (pasos «model_output» o lista «outputs»)."""
+    bloques = []
+    for paso in datos.get("steps") or []:
+        if paso.get("type") == "model_output":
+            bloques += [c.get("text", "") for c in paso.get("content") or [] if c.get("type") == "text"]
+    if not bloques:
+        bloques = [o.get("text", "") for o in datos.get("outputs") or [] if o.get("type") == "text"]
+    return "".join(bloques)
+
+
+def llamar_gemini_interactions(clave, modelo, prompt, imagen_b64, temperatura, forzar_json):
+    cuerpo = {
+        "model": modelo,
+        "input": [{"type": "image", "mime_type": "image/jpeg", "data": imagen_b64},
+                  {"type": "text", "text": prompt}],
+        "generation_config": {"temperature": temperatura},
+    }
+    if forzar_json:
+        cuerpo["response_format"] = {"type": "text", "mime_type": "application/json"}
+    url, cab = f"{GEMINI_URL}/interactions", {"x-goog-api-key": clave}
+    r = requests.post(url, headers=cab, json=cuerpo, timeout=180)
+    if r.status_code == 400:
+        # Si el servicio rechaza algún parámetro opcional, se repite la petición sin él.
+        for opcional in ("generation_config", "response_format"):
+            if opcional in r.text and opcional in cuerpo:
+                cuerpo.pop(opcional)
+                r = requests.post(url, headers=cab, json=cuerpo, timeout=180)
+                if r.status_code != 400:
+                    break
+    if r.status_code != 200:
+        raise RuntimeError(f"Error {r.status_code} de la API de Gemini (Interactions): {r.text[:500]}")
+    texto = texto_interaction(r.json())
+    if not texto:
+        raise RuntimeError(f"Respuesta sin texto: {r.text[:500]}")
+    return texto
 
 
 def llamar_groq(clave, modelo, prompt, jpeg, temperatura, forzar_json):
@@ -258,13 +345,23 @@ with st.sidebar:
         lista = []
         if clave:
             try:
-                lista = modelos_gemini(clave)
+                with st.spinner("Comprobando los modelos disponibles…"):
+                    lista = modelos_operativos(clave)
+                if not lista:
+                    st.error("Ningún modelo ha respondido con esta clave. Compruebe que la clave es correcta "
+                             "o inténtelo de nuevo en unos minutos.")
             except Exception as e:
-                st.warning(f"No se pudo obtener la lista de modelos ({e}). Indique el nombre del modelo manualmente.")
-        if lista:
-            modelo = st.selectbox("Modelo", lista, help="Los modelos «flash» suelen estar incluidos en el nivel gratuito.")
-        else:
-            modelo = st.text_input("Modelo", value="gemini-2.5-flash")
+                msg = str(e)
+                if "400" in msg or "403" in msg:
+                    st.error("La clave no es válida. Cópiela de nuevo desde Google AI Studio.")
+                else:
+                    st.error(f"No se pudo conectar con Gemini ({msg[:150]}).")
+        descartados = st.session_state.setdefault("modelos_descartados", set())
+        lista = [m for m in lista if m not in descartados]
+        modelo = st.selectbox("Modelo", lista, disabled=not lista,
+                              placeholder="Introduzca la clave para ver los modelos",
+                              help="Solo se muestran los modelos que han respondido con esta clave. "
+                                   "Se recomienda mantener el modelo propuesto.")
     elif proveedor == "Groq":
         clave = st.text_input("Clave de la API de Groq", value=secreto("GROQ_API_KEY"), type="password",
                               help="La clave solo se usa durante esta sesión y no se guarda.")
@@ -279,7 +376,7 @@ with st.sidebar:
     temperatura = st.slider("Temperatura", 0.0, 1.0, 0.2, 0.1,
                             help="Valores bajos dan respuestas más estables; valores altos, más variadas.")
     forzar_json = st.checkbox("Forzar respuesta en JSON", value=False,
-                              help="Pide al servicio que devuelva JSON válido. Desactivado en la ronda 1, "
+                              help="Pide al servicio que devuelva JSON válido. Desactivado con la plantilla básica, "
                                    "para ver la diferencia con una instrucción básica.")
     st.divider()
     st.caption("Use solo fotografías de platos, sin personas ni datos personales. En el nivel gratuito, "
@@ -349,11 +446,10 @@ with c2:
     base = PLANTILLAS[plantilla].replace("{diametro}", str(diametro)).replace("{notas}", notas or "ninguna")
     prompt = st.text_area("Instrucción (editable)", value=base, height=330,
                           key=f"prompt_{plantilla}_{diametro}_{notas}")
-    cc = st.columns([1, 1, 1.2])
-    ronda = cc[0].selectbox("Ronda", [1, 2, 3, 4], index=min(int(plantilla[0]) - 1, 3))
-    repeticiones = cc[1].number_input("Repeticiones", 1, 3, 1, help="Envía la misma petición varias veces para observar la variabilidad.")
-    enviar = cc[2].button("Analizar plato", type="primary", width="stretch",
-                          disabled=(jpeg is None and proveedor != "Modo demostración") or not prompt.strip())
+    cc = st.columns([1, 1.4])
+    repeticiones = cc[0].number_input("Repeticiones", 1, 3, 1, help="Envía la misma petición varias veces para observar la variabilidad.")
+    enviar = cc[1].button("Analizar plato", type="primary", width="stretch",
+                          disabled=(jpeg is None and proveedor != "Modo demostración") or not prompt.strip() or not modelo)
 
 # ------------------------------------------------------------------ llamada al modelo
 if enviar:
@@ -364,7 +460,18 @@ if enviar:
         with st.spinner(f"Consultando el modelo ({rep + 1}/{int(repeticiones)})…"):
             try:
                 if proveedor == "Gemini (Google)":
-                    texto = llamar_gemini(clave, modelo, prompt, jpeg, temperatura, forzar_json)
+                    candidatos = [modelo] + [m for m in lista if m != modelo][:4]
+                    for i, m in enumerate(candidatos):
+                        try:
+                            texto = llamar_gemini(clave, m, prompt, jpeg, temperatura, forzar_json)
+                            break
+                        except RuntimeError as err:
+                            if not modelo_no_compatible(str(err)) or i == len(candidatos) - 1:
+                                raise
+                            st.session_state.modelos_descartados.add(m)
+                    if m != modelo:
+                        st.info(f"El modelo {modelo} no es compatible con esta aplicación; se ha utilizado {m}.")
+                        modelo = m
                 elif proveedor == "Groq":
                     texto = llamar_groq(clave, modelo, prompt, jpeg, temperatura, forzar_json)
                 else:
@@ -380,7 +487,9 @@ if enviar:
         est = totales(datos) if isinstance(datos, dict) else {k: None for k in NUTRIENTES}
         if est["kcal"] is None:
             est["kcal"] = kcal_de_texto(texto)
-        fila = {"hora": datetime.now().strftime("%H:%M:%S"), "ronda": ronda, "plato": nombre_plato or "(sin nombre)",
+        st.session_state.contador = st.session_state.get("contador", 0) + 1
+        fila = {"intento": st.session_state.contador, "hora": datetime.now().strftime("%H:%M:%S"),
+                "plato": nombre_plato or "(sin nombre)",
                 "plantilla": plantilla, "modelo": modelo, "temperatura": temperatura,
                 "json_valido": isinstance(datos, dict)}
         for k in NUTRIENTES:
@@ -429,24 +538,41 @@ if st.session_state.intentos:
     st.divider()
     st.subheader("5. Comparación de intentos")
     hist = pd.DataFrame(st.session_state.intentos)
-    cols = ["hora", "ronda", "plato", "plantilla", "modelo", "json_valido", "kcal_est", "kcal_ref",
+    cols = ["intento", "hora", "plato", "plantilla", "modelo", "json_valido", "kcal_est", "kcal_ref",
             "error_kcal", "error_rel_%"]
-    st.dataframe(hist[[c for c in cols if c in hist.columns]], width="stretch", hide_index=True)
-    if "error_abs_kcal" in hist.columns and hist["error_abs_kcal"].notna().any():
-        resumen = (hist.dropna(subset=["error_abs_kcal"]).groupby("ronda")
-                   .agg(intentos=("error_abs_kcal", "size"), MAE_kcal=("error_abs_kcal", "mean"),
-                        error_relativo_medio=("error_rel_%", "mean")).round(1))
-        s1, s2 = st.columns([1, 1.4])
-        s1.markdown("**Error por ronda**")
-        s1.dataframe(resumen, width="stretch")
-        s2.markdown("**Error absoluto medio (kcal) por ronda**")
-        s2.bar_chart(resumen["MAE_kcal"].rename(index=lambda r: f"Ronda {r}"))
-    else:
-        st.caption("Indique las kcal de referencia para calcular el error de cada intento.")
-    b1, b2 = st.columns([1, 1])
-    b1.download_button("Descargar tabla (CSV)", hist.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="intentos_platos.csv", mime="text/csv", width="stretch")
-    if b2.button("Borrar historial", width="stretch"):
+    tabla = hist[[c for c in cols if c in hist.columns]].copy()
+    tabla.insert(0, "eliminar", False)
+    editada = st.data_editor(tabla, width="stretch", hide_index=True, key=f"editor_{len(hist)}",
+                             disabled=[c for c in tabla.columns if c != "eliminar"],
+                             column_config={"eliminar": st.column_config.CheckboxColumn("Eliminar", width="small")})
+    b1, b2, b3 = st.columns(3)
+    seleccion = editada.loc[editada["eliminar"], "intento"].tolist()
+    if b1.button("Eliminar seleccionados", width="stretch", disabled=not seleccion):
+        st.session_state.intentos = [f for f in st.session_state.intentos if f["intento"] not in seleccion]
+        if not st.session_state.intentos:
+            st.session_state.pop("ultimo", None)
+        st.rerun()
+    if b2.button("Borrar todo", width="stretch"):
         st.session_state.intentos = []
         st.session_state.pop("ultimo", None)
         st.rerun()
+    b3.download_button("Descargar tabla (CSV)", hist.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="intentos_platos.csv", mime="text/csv", width="stretch")
+
+    con_error = hist.dropna(subset=["error_abs_kcal"]) if "error_abs_kcal" in hist.columns else hist.iloc[0:0]
+    if len(con_error):
+        s1, s2 = st.columns([1.4, 1], gap="large")
+        with s1:
+            st.markdown("**Error absoluto (kcal) de cada intento**")
+            st.bar_chart(con_error, x="intento", y="error_abs_kcal", color="plantilla",
+                         x_label="Intento", y_label="Error absoluto (kcal)")
+        with s2:
+            st.markdown("**Error medio por plantilla**")
+            resumen = (con_error.groupby("plantilla")
+                       .agg(intentos=("error_abs_kcal", "size"), MAE_kcal=("error_abs_kcal", "mean"),
+                            error_relativo_medio=("error_rel_%", "mean")).round(1))
+            st.dataframe(resumen, width="stretch")
+    sin_error = len(hist) - len(con_error)
+    if sin_error:
+        st.caption(f"{sin_error} intento(s) sin error calculado: falta la referencia de kcal o no se encontró "
+                   "la cifra de kcal en la respuesta.")

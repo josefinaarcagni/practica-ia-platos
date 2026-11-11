@@ -31,7 +31,7 @@ Si no dispone de clave, el **modo demostración** permite recorrer la aplicació
    - La estimación por alimento.
    - Los supuestos y la confianza que declara el modelo.
    - La diferencia con la referencia.
-5. **Comparación.** Muestra el error de cada intento y el MAE por ronda. Descargue la tabla en CSV para el entregable.
+5. **Comparación.** Muestra el error de cada intento y el MAE por plantilla. Los intentos erróneos se pueden eliminar. Descargue la tabla en CSV para el entregable.
 
 **Parámetros de la barra lateral**
 - **Temperatura:** grado de variabilidad de las respuestas.
@@ -52,5 +52,5 @@ Utilice solo fotografías de platos, sin personas ni datos personales. En el niv
 |---|---|
 | Error | estimado − referencia (positivo: sobrestima; negativo: infraestima) |
 | Error absoluto | \|estimado − referencia\| |
-| MAE | media de los errores absolutos de una ronda |
+| MAE | media de los errores absolutos de los intentos con una misma plantilla |
 | Error relativo (%) | 100 · \|estimado − referencia\| / referencia |

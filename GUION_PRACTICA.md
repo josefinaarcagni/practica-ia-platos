@@ -43,7 +43,7 @@
 3. Prueba al menos dos versiones y quédate con la que tenga menor error.
 
 ### Puesta en común (15 min)
-Compara con el resto de la clase el **MAE por ronda** que aparece en la sección 5 de la app.
+Compara con el resto de la clase el **error medio por plantilla** que aparece en la sección 5 de la app.
 
 ## Entregable
 
@@ -58,5 +58,5 @@ Compara con el resto de la clase el **MAE por ronda** que aparece en la sección
 
 - **Error** = estimado − referencia. Si es positivo, el modelo sobrestima; si es negativo, infraestima.
 - **Error absoluto** = |estimado − referencia|
-- **MAE** (error absoluto medio) = media de los errores absolutos de todos los intentos de una ronda.
+- **MAE** (error absoluto medio) = media de los errores absolutos de todos los intentos con una misma plantilla.
 - **Error relativo (%)** = 100 · |estimado − referencia| / referencia
